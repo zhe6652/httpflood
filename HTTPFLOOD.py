@@ -597,7 +597,6 @@ if __name__ == '__main__':
     # Q:speed and accurate  fin  wireshark
     # Q:proxy or not
     # Q:distru improve
-    # Q:GUI or CLI
 
     # SPEAK slowris
     # SPEAK service scan
