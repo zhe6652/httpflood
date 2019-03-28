@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
+from gevent import monkey;
+monkey.patch_all()
 import sys, os, random, requests, time, socket, argparse, errno, queue, ssl, pymysql
 from threading import Thread, Event
 from urllib.parse import urlparse, unquote
-from scapy.all import *
+from gevent.pool import Pool
+
 
 # versioning
 VERSION = (1, 0, 0)
@@ -75,7 +78,7 @@ class PortScanner():
         self.allRanges = allRanges
         self.openPort = queue.Queue()
 
-    def SynScan(self, ranges):
+    def SynScan(self, port):
         ip_layper = IP()
         ip_layper.version = 4
         ip_layper.tos = 0x0
@@ -83,29 +86,29 @@ class PortScanner():
         ip_layper.frag = 0
         ip_layper.ttl = 128
         ip_layper.dst = self.ip
-        for port in ranges:
-            tcp_layer = TCP()
-            # print(port, end =" ")
-            tcp_layer.dport = port
-            tcp_layer.sport = 20000
-            tcp_layer.flags = "S"
-            tcp_layer.urgptr = 0
-            tcp_layer.window = 8192
 
-            pkt = ip_layper / tcp_layer
+        tcp_layer = TCP()
+        # print(port, end =" ")
+        tcp_layer.dport = port
+        tcp_layer.sport = 20000
+        tcp_layer.flags = "S"
+        tcp_layer.urgptr = 0
+        tcp_layer.window = 8192
 
-            if args.verbosity > 0:
-                print("[*]Scanning port %s ..." % port)
+        pkt = ip_layper / tcp_layer
 
-            response = sr1(pkt, timeout=args.timeout, verbose=0)
-            if response == None:
-                # print("[-]port %s no response" % port)
-                pass
-            else:
-                # print(response.display())
-                if int(response[TCP].flags) == 18:
-                    self.openPort.put(port)
-                    # print("[+]Syn Scan Open Port Found:" + str(port))
+        if args.verbosity > 0:
+            print("[*]Scanning port %s ..." % port)
+
+        response = sr1(pkt, timeout=args.timeout, verbose=0)
+        if response == None:
+            # print("[-]port %s no response" % port)
+            pass
+        else:
+            # print(response.display())
+            if int(response[TCP].flags) == 18:
+                self.openPort.put(port)
+                # print("[+]Syn Scan Open Port Found:" + str(port))
 
     def FinScan(self, ranges):
         ip_layper = IP()
@@ -176,6 +179,20 @@ class PortScanner():
         print(round(closetime - starttime, 2), ' Seconds ')
 
         return tmp
+
+    def startScan2(self):
+        print("[*]Starting Port Scan")
+        starttime = time.time()
+        pool = Pool(500)
+
+        pool.map(self.SynScan, range(1, 65536))
+        pool.join()
+        closetime = time.time()
+        print("[+] Scan Started On ", time.ctime(starttime))
+        print("[+] Scan Finished On", time.ctime(closetime))
+        print('[+] Total Time Taken ', end=" ")
+        print(round(closetime - starttime, 2), ' Seconds ')
+
 
 
 # Banner Grabbing Class
@@ -467,7 +484,7 @@ class HTTPFlooder():
         s.send("{}\r\n".format("Accept-language: en-US,en,q=0.5").encode("utf-8"))
         return s
 
-
+'''
 def DDOS():
     conn = pymysql.connect(host='localhost', user='root', passwd='root')
     cursor = conn.cursor()
@@ -498,9 +515,11 @@ def startDDos():
         raise e
     finally:
         db.close()
-
+'''
 
 if __name__ == '__main__':
+    #TODO: distributed
+    #TODO: improve flood with gevent
     parser = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
         # description=textwrap.dedent('''\
@@ -520,6 +539,8 @@ if __name__ == '__main__':
     parser.add_argument('-P', '--proxy',
                         help="enable proxy mode, reading proxies from file, note that each proxy creates one thread, not too many proxies in files",
                         action="store_true")
+
+    #TODO: Proxy need to be cared
     parser.add_argument('-a', "--auth", help="authentication if http/https needs e.g. <zhe6652 password.>", nargs=2)
     parser.add_argument('-t', "--timeout", help="timeout for connection",
                         type=float, default=1)
@@ -534,6 +555,8 @@ if __name__ == '__main__':
     parser.add_argument('-o', "--output", dest="output", help="Specify Path For Saving Output in Txt.",
                         default=None)
 
+    #TODO:OUTPUT Needs to be cared
+
     parser.add_argument('--slowloris', action="store_true", help="Use Slowloris for attack")
     parser.add_argument("--https", help="Use https for Slowloris", action="store_true",
                         )
@@ -543,12 +566,12 @@ if __name__ == '__main__':
     args = parser.parse_args()
     headerOfmain()
     # DDOS()
-    startDDos()
+    #startDDos()
 
     if args.SynScan:
         ports = port_extraction(args.port)
         scan = PortScanner(args.target, ports, args.threads)
-        scan.startScan("S")
+        scan.startScan2()
 
     if args.FinScan:
         ports = port_extraction(args.port)
@@ -558,6 +581,7 @@ if __name__ == '__main__':
     if args.H:
         host = {}
         ports = port_extraction(args.port)
+        #host[args.target] = ports
         host[valid_ip(args.target)] = ports
         for h, p in host.items():
             print("[*] IP Address Detected : {} | Num. Of Port Input : {}".format(h, len(p)))
@@ -594,13 +618,5 @@ if __name__ == '__main__':
         print('[+]Start sending requests...')
         fd.startAttack()
 
-    # Q:speed and accurate  fin  wireshark
-    # Q:proxy or not
-    # Q:distru improve
 
-    # SPEAK slowris
-    # SPEAK service scan
-
-    # proxy for scan
-    # output
 
