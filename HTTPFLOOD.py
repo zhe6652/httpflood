@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from gevent import monkey;
 monkey.patch_all()
-import sys, os, random, requests, time, socket, argparse, errno, queue, ssl, pymysql
+import sys, os, random, requests, time, socket, argparse, errno, queue, struct, threading, ssl
 from threading import Thread, Event
 from urllib.parse import urlparse, unquote
 from gevent.pool import Pool
@@ -14,6 +14,20 @@ __version__ = '%d.%d.%d' % VERSION[0:3]
 # if python ver < 3.5
 if sys.version_info[0:2] < (3, 5):
     raise RuntimeError('[-]Python 3.5 or higher is required!')
+
+
+def get_host_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(('8.8.8.8', 80))
+        hostip = s.getsockname()[0]
+
+    except Exception:
+        hostip = "172.16.28.169"
+    finally:
+        s.close()
+
+    return hostip
 
 
 def headerOfmain():
@@ -73,121 +87,135 @@ def valid_ip(ip):
 
 class PortScanner():
     def __init__(self, target, allRanges, threads):
-        self.ip = target
+        self.dest_ip = target
+        self.source_ip = get_host_ip()
         self.threads = threads
         self.allRanges = allRanges
-        self.openPort = queue.Queue()
+        self.openPort = set()
 
-    def SynScan(self, port):
-        ip_layper = IP()
-        ip_layper.version = 4
-        ip_layper.tos = 0x0
-        ip_layper.id = 1
-        ip_layper.frag = 0
-        ip_layper.ttl = 128
-        ip_layper.dst = self.ip
 
-        tcp_layer = TCP()
-        # print(port, end =" ")
-        tcp_layer.dport = port
-        tcp_layer.sport = 20000
-        tcp_layer.flags = "S"
-        tcp_layer.urgptr = 0
-        tcp_layer.window = 8192
+    def __checksum(self, msg):
+        ''' Check Summing '''
 
-        pkt = ip_layper / tcp_layer
+        s = 0
+        for i in range(0, len(msg), 2):
+            w = (msg[i] << 8) + msg[i + 1]
+            s = s + w
 
-        if args.verbosity > 0:
-            print("[*]Scanning port %s ..." % port)
+        s = (s >> 16) + (s & 0xffff)
+        s = ~s & 0xffff
 
-        response = sr1(pkt, timeout=args.timeout, verbose=0)
-        if response == None:
-            # print("[-]port %s no response" % port)
+        return s
+
+    def __CreateSocket(self, source_ip, dest_ip):
+        ''' create socket connection '''
+
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
+        except socket.error as  msg:
+            print ('Socket create error: ', str(msg[0]), 'message: ', msg[1])
+            sys.exit()
+
+        ''' Set the IP header manually '''
+
+        s.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
+        # s.settimeout(1)
+        return s
+
+    def __CreateIpHeader(self, source_ip, dest_ip):
+        ''' create ip header '''
+
+        # packet = ''
+
+        # ip header option
+
+        headerlen = 5
+        version = 4
+        tos = 0
+        tot_len = 20 + 20
+        id = random.randrange(18000, 65535, 1)
+        frag_off = 0
+        ttl = 255
+        protocol = socket.IPPROTO_TCP
+        check = 10
+        saddr = socket.inet_aton(source_ip)
+        daddr = socket.inet_aton(dest_ip)
+        hl_version = (version << 4) + headerlen
+        ip_header = struct.pack('!BBHHHBBH4s4s', hl_version, tos, tot_len, id, frag_off, ttl, protocol, check, saddr, daddr)
+
+        return ip_header
+
+    def __create_tcp_syn_header(self, source_ip, dest_ip, dest_port):
+        ''' create tcp syn header function '''
+
+        source = random.randrange(32000, 62000, 1)  # randon select one source_port
+        seq = 0
+        ack_seq = 0
+        doff = 5
+
+        ''' tcp flags '''
+        fin = 0
+        syn = 1
+        rst = 0
+        psh = 0
+        ack = 0
+        urg = 0
+        window = socket.htons(8192)  # max windows size
+        check = 0
+        urg_ptr = 0
+        offset_res = (doff << 4) + 0
+        tcp_flags = fin + (syn << 1) + (rst << 2) + (psh << 3) + (ack << 4) + (urg << 5)
+        tcp_header = struct.pack('!HHLLBBHHH', source, dest_port, seq, ack_seq, offset_res, tcp_flags, window, check, urg_ptr)
+
+        ''' headers option '''
+        source_address = socket.inet_aton(source_ip)
+        dest_address = socket.inet_aton(dest_ip)
+        placeholder = 0
+        protocol = socket.IPPROTO_TCP
+        tcp_length = len(tcp_header)
+        psh = struct.pack('!4s4sBBH', source_address, dest_address, placeholder, protocol, tcp_length);
+        psh = psh + tcp_header;
+        tcp_checksum = self.__checksum(psh)
+
+        ''' Repack the TCP header and fill in the correct checksum '''
+        tcp_header = struct.pack('!HHLLBBHHH', source, dest_port, seq, ack_seq, offset_res, tcp_flags, window, tcp_checksum,
+                          urg_ptr)
+
+        return tcp_header
+
+    def SynScan(self, des_port):
+        s = self.__CreateSocket(self.source_ip, self.dest_ip)
+        ip_header = self.__CreateIpHeader(self.source_ip, self.dest_ip)
+        tcp_header = self.__create_tcp_syn_header(self.source_ip, self.dest_ip, des_port)
+        packet = ip_header + tcp_header
+        try:
+            s.sendto(packet, (self.dest_ip, 0))
+            data = s.recvfrom(1024)[0][0:]
+            ip_header_len = (data[0] & 0x0f) * 4
+            # ip_header_ret = data[0: ip_header_len]
+            tcp_header_len = (data[32] & 0xf0) >> 2
+            tcp_header_ret = data[ip_header_len:ip_header_len + tcp_header_len - 1]
+            ''' SYN/ACK flags '''
+            if tcp_header_ret[13] == 0x12:
+                sport = (tcp_header_ret[0] << 8) + tcp_header_ret[1]
+                self.openPort.add(sport)
+            s.close()
+        except socket.timeout:
             pass
-        else:
-            # print(response.display())
-            if int(response[TCP].flags) == 18:
-                self.openPort.put(port)
-                # print("[+]Syn Scan Open Port Found:" + str(port))
 
-    def FinScan(self, ranges):
-        ip_layper = IP()
-        ip_layper.version = 4
-        ip_layper.tos = 0x0
-        ip_layper.id = 1
-        ip_layper.frag = 0
-        ip_layper.ttl = 128
-        ip_layper.dst = self.ip
-
-        for port in ranges:
-            tcp_layer = TCP()
-            tcp_layer.dport = port
-            tcp_layer.sport = 20001
-            tcp_layer.flags = "F"
-            tcp_layer.urgptr = 0
-            tcp_layer.window = 8192
-
-            pkt = ip_layper / tcp_layer
-
-            if args.verbosity > 0:
-                print("[*]Scanning port %s ..." % port)
-
-            response = sr1(pkt, timeout=args.timeout, verbose=0)
-            if response == None:
-                self.openPort.put(port)
-
-    def startScan(self, flag):
-        if flag == "S":
-            funcname = self.SynScan
-        elif flag == "F":
-            funcname = self.FinScan
-
-        threadlist = []
-
-        tempRange = []
-        for i in range(0, len(self.allRanges), self.threads):
-            tempRange.append([self.allRanges[i:i + self.threads]][0])
-
+    def startScan(self):
         print("[*]Starting Port Scan")
         starttime = time.time()
-        for i in tempRange:
-            t = threading.Thread(target=funcname, args=(i,))
-            threadlist.append(t)
-            t.start()
+        pool = Pool(10)
 
-        for i in threadlist:
-            i.join()
-
-        tmp = []
-        while not self.openPort.empty():
-            tmp.append(self.openPort.get())
-
-        tmp.sort()
-
-        if args.SynScan:
-            for i in tmp:
-                print("[+]Syn Scan Open Port Found:" + str(i))
-
-        elif args.FinScan:
-            for i in tmp:
-                print("[+]Fin Scan Open Port Found:" + str(i))
-
-        closetime = time.time()
-        print("[+] Scan Started On ", time.ctime(starttime))
-        print("[+] Scan Finished On", time.ctime(closetime))
-        print('[+] Total Time Taken ', end=" ")
-        print(round(closetime - starttime, 2), ' Seconds ')
-
-        return tmp
-
-    def startScan2(self):
-        print("[*]Starting Port Scan")
-        starttime = time.time()
-        pool = Pool(500)
-
-        pool.map(self.SynScan, range(1, 65536))
+        pool.map(self.SynScan, range(1, 1000))
         pool.join()
         closetime = time.time()
+
+        tmplist = list(self.openPort)
+        tmplist.sort()
+        for i in tmplist:
+            print("[+]Port %s Open" % i)
         print("[+] Scan Started On ", time.ctime(starttime))
         print("[+] Scan Finished On", time.ctime(closetime))
         print('[+] Total Time Taken ', end=" ")
@@ -571,7 +599,7 @@ if __name__ == '__main__':
     if args.SynScan:
         ports = port_extraction(args.port)
         scan = PortScanner(args.target, ports, args.threads)
-        scan.startScan2()
+        scan.startScan()
 
     if args.FinScan:
         ports = port_extraction(args.port)
